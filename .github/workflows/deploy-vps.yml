@@ -1,0 +1,106 @@
+name: Build & Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.actor }}/my-app
+  CONTAINER_NAME: my-app
+  APP_PORT: 8080
+
+jobs:
+  build-image:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Thiet lap JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: temurin
+          cache: gradle
+
+      - name: Cap quyen thuc thi cho Gradle Wrapper
+        run: chmod +x gradlew
+
+      - name: Build JAR (bo qua test)
+        run: ./gradlew bootJar -x test
+
+      - name: Dang nhap vao GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Thiet lap Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & Push Docker Image len GHCR
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-vps:
+    name: Deploy len VPS qua SSH
+    runs-on: ubuntu-latest
+    needs: build-image
+
+    steps:
+      - name: Thuc thi cau lenh trien khai tren VPS qua SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+
+          script: |
+            echo "=============================="
+            echo "  Buoc 1: Dang nhap GHCR"
+            echo "=============================="
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
+              -u ${{ github.actor }} --password-stdin
+
+            echo "=============================="
+            echo "  Buoc 2: Keo Image moi nhat"
+            echo "=============================="
+            docker pull ${{ env.IMAGE_NAME }}:latest
+
+            echo "=============================="
+            echo "  Buoc 3: Dung container cu"
+            echo "=============================="
+            docker stop ${{ env.CONTAINER_NAME }} || true
+            docker rm   ${{ env.CONTAINER_NAME }} || true
+
+            echo "=============================="
+            echo "  Buoc 4: Chay container moi"
+            echo "=============================="
+            docker run -d \
+              --name ${{ env.CONTAINER_NAME }} \
+              -p ${{ env.APP_PORT }}:${{ env.APP_PORT }} \
+              --restart unless-stopped \
+              ${{ env.IMAGE_NAME }}:latest
+
+            echo "=============================="
+            echo "  Buoc 5: Kiem tra trang thai"
+            echo "=============================="
+            sleep 5
+            docker ps --filter "name=${{ env.CONTAINER_NAME }}"
+            echo ""
+            echo "App chay tai: http://${{ secrets.SSH_HOST }}:${{ env.APP_PORT }}/actuator/health"
